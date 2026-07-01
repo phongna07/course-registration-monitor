@@ -1,5 +1,7 @@
 const { chromium } = require('playwright');
 
+const maxRefreshClickCount = 1000;
+
 function getHeadlessOption() {
     const option = process.argv.find((argument) =>
         argument.startsWith('--headless=')
@@ -57,20 +59,23 @@ async function runAutomation() {
             }),
         });
 
-    await courseTable.waitFor({ state: 'visible' });
-
     const targetCourseRow = courseTable
         .locator('tbody tr:not([aria-hidden="true"])')
         .filter({
             has: page.getByText(targetCourseName, { exact: true }),
         });
 
-    await pageTwoLink.waitFor({ state: 'visible' });
-    await pageTwoLink.click();
+    const openPageTwo = async () => {
+        await courseTable.waitFor({ state: 'visible' });
+        await pageTwoLink.waitFor({ state: 'visible' });
+        await pageTwoLink.click();
 
-    // The target course only appears on page 2, so its visible row confirms
-    // that page 2's table data has finished rendering.
-    await targetCourseRow.waitFor({ state: 'visible', timeout: 30000 });
+        // The target course only appears on page 2, so its visible row confirms
+        // that page 2's table data has finished rendering.
+        await targetCourseRow.waitFor({ state: 'visible', timeout: 30000 });
+    };
+
+    await openPageTwo();
 
     const readCourseStatus = () => courseTable.evaluate((table, courseName) => {
         const normalize = (value) => value?.trim().replace(/\s+/g, ' ') ?? '';
@@ -128,6 +133,7 @@ async function runAutomation() {
     const refreshButton = page.locator(
         'main .header .action.no-print > button'
     );
+    let refreshClickCount = 0;
 
     while (true) {
         const course = await readCourseStatus();
@@ -192,6 +198,16 @@ async function runAutomation() {
         const response = await refreshResponse;
         await response.finished();
         await targetCourseRow.waitFor({ state: 'visible' });
+        refreshClickCount += 1;
+
+        if (refreshClickCount === maxRefreshClickCount) {
+            console.log(
+                `Refresh button clicked ${maxRefreshClickCount} times; reloading the browser page.`
+            );
+            await page.reload({ waitUntil: 'domcontentloaded' });
+            await openPageTwo();
+            refreshClickCount = 0;
+        }
     }
 
 

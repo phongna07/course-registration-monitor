@@ -213,10 +213,23 @@ async function runAutomation() {
                 ['xhr', 'fetch'].includes(response.request().resourceType()) &&
                 response.request().method() !== 'OPTIONS',
             { timeout: 30000 }
-        );
+        ).catch((error) => {
+            console.warn(
+                `Refresh response failed: ${error.message}. Reloading the page.`
+            );
+            return null;
+        });
 
         await refreshButton.click();
         const response = await refreshResponse;
+
+        if (!response) {
+            await page.reload({ waitUntil: 'domcontentloaded' });
+            await openPageTwo();
+            refreshClickCount = 0;
+            continue;
+        }
+
         await response.finished();
         await targetCourseRow.waitFor({ state: 'visible' });
         refreshClickCount += 1;

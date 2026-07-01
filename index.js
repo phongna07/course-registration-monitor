@@ -65,6 +65,10 @@ async function runAutomation() {
             has: page.getByText(targetCourseName, { exact: true }),
         });
 
+    const registeredCreditsText = page.locator(
+        '#root > div > div > div.ant-layout.ant-layout-has-sider.css-13xpg2l.css-var-_r_0_ > div.ant-pro-layout-container.css-13xpg2l > main > div > div.ant-pro-grid-content.css-13xpg2l > div > div > div:nth-child(2) > div > div.ant-card-body > div > div.header > div.action > span'
+    );
+
     const openPageTwo = async () => {
         await courseTable.waitFor({ state: 'visible' });
         await pageTwoLink.waitFor({ state: 'visible' });
@@ -118,6 +122,19 @@ async function runAutomation() {
         };
     }, targetCourseName);
 
+    const readRegisteredCredits = async () => {
+        const text = (await registeredCreditsText.innerText()).trim();
+        const match = text.match(/Registered Credits:\s*(\d+(?:\.\d+)?)/i);
+
+        if (!match) {
+            throw new Error(
+                `Could not read registered credits from: "${text}"`
+            );
+        }
+
+        return Number(match[1]);
+    };
+
     const registerButton = targetCourseRow.getByRole('button', {
         name: 'Register',
         exact: true,
@@ -136,7 +153,10 @@ async function runAutomation() {
     let refreshClickCount = 0;
 
     while (true) {
-        const course = await readCourseStatus();
+        const [course, registeredCredits] = await Promise.all([
+            readCourseStatus(),
+            readRegisteredCredits(),
+        ]);
 
         if (!course) {
             throw new Error(`Could not find course: ${targetCourseName}`);
@@ -144,7 +164,8 @@ async function runAutomation() {
 
         console.log(
             `[${new Date().toLocaleString()}] ${targetCourseName}: ` +
-            `${course.status} (${course.availableSlots} slots available)`
+            `${course.status} (${course.availableSlots} slots available, ` +
+            `registered credits: ${registeredCredits})`
         );
 
         if (course.status === 'AVAILABLE') {

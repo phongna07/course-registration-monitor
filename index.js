@@ -1,6 +1,35 @@
 const { chromium } = require('playwright');
 
-const maxRefreshClickCount = 1000;
+const PORTAL_URL =
+    'https://one.vinuni.edu.vn/student/academic/course-registration';
+const API_ORIGIN = 'https://one-apigw.vinuni.edu.vn';
+const REGISTRATION_URL =
+    `${API_ORIGIN}/connect/qldt/dang-ky-tin-chi/dang-ky/lop-hoc-phan`;
+
+const TOKEN_REFRESH_INTERVAL_MS = 60_000;
+const TOKEN_CAPTURE_TIMEOUT_MS = 30_000;
+const REGISTRATION_INTERVAL_MS = 1_000;
+
+const BROWSER_HEADER_NAMES = [
+    'accept-language',
+    'priority',
+    'sec-ch-ua',
+    'sec-ch-ua-mobile',
+    'sec-ch-ua-platform',
+    'sec-fetch-dest',
+    'sec-fetch-mode',
+    'sec-fetch-site',
+    'user-agent',
+];
+
+const REGISTRATION_BODY = {
+    phieuDktcId: '6a4259f7b061bb0ed785995f',
+    dangKy: {
+        lopHocPhanId: '6a41eb8510fdcb8786daf205',
+        maKhoaNganh: '',
+    },
+    silent: true,
+};
 
 function getHeadlessOption() {
     const option = process.argv.find((argument) =>
@@ -18,236 +47,244 @@ function getHeadlessOption() {
     return value === 'true';
 }
 
-async function runAutomation() {
-    const targetCourseName = 'Critical and Creative Thinking';
-    const refreshIntervalMs = 1000;
-    const headless = getHeadlessOption();
+function timestamp() {
+    return new Date().toLocaleString();
+}
 
-    console.log(`Launching browser with headless=${headless}`);
-    const browser = await chromium.launch({ headless });
+function sleep(milliseconds, signal) {
+    return new Promise((resolve) => {
+        if (signal.aborted) {
+            resolve();
+            return;
+        }
 
-    // Create a new context using the saved authentication state
-    const context = await browser.newContext({ storageState: 'auth.json' });
-    const page = await context.newPage();
+        const timer = setTimeout(finish, milliseconds);
 
-    // Navigate directly to the internal university page you need to scrape/automate
-    await page.goto('https://one.vinuni.edu.vn/student/academic/course-registration');
+        function finish() {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', finish);
+            resolve();
+        }
 
-    // Identify the pagination list by its numbered links, without relying on
-    // generated classes or an optional `title` attribute on the list item.
-    const pagination = page
-        .getByRole('main')
-        .locator('ul')
-        .filter({
-            has: page.locator('a').filter({ hasText: /^\s*1\s*$/ }),
-        })
-        .filter({
-            has: page.locator('a').filter({ hasText: /^\s*2\s*$/ }),
-        });
+        signal.addEventListener('abort', finish, { once: true });
+    });
+}
 
-    const pageTwoLink = pagination
-        .locator('a')
-        .filter({ hasText: /^\s*2\s*$/ });
-
-    const courseTable = page
-        .getByRole('main')
-        .getByRole('table')
-        .filter({
-            has: page.getByRole('columnheader', {
-                name: 'Available Slots',
-                exact: true,
-            }),
-        });
-
-    const targetCourseRow = courseTable
-        .locator('tbody tr:not([aria-hidden="true"])')
-        .filter({
-            has: page.getByText(targetCourseName, { exact: true }),
-        });
-
-    const registeredCreditsText = page.locator(
-        '#root > div > div > div.ant-layout.ant-layout-has-sider.css-13xpg2l.css-var-_r_0_ > div.ant-pro-layout-container.css-13xpg2l > main > div > div.ant-pro-grid-content.css-13xpg2l > div > div > div:nth-child(2) > div > div.ant-card-body > div > div.header > div.action > span'
+function selectBrowserHeaders(headers) {
+    return Object.fromEntries(
+        BROWSER_HEADER_NAMES
+            .filter((name) => headers[name])
+            .map((name) => [name, headers[name]])
     );
+}
 
-    const openPageTwo = async () => {
-        await courseTable.waitFor({ state: 'visible' });
-        await pageTwoLink.waitFor({ state: 'visible' });
-        await pageTwoLink.click();
+async function loadPageAndCaptureAuthorization(page, loadPage) {
+    let timeout;
+    let onRequest;
 
-        // The target course only appears on page 2, so its visible row confirms
-        // that page 2's table data has finished rendering.
-        await targetCourseRow.waitFor({ state: 'visible', timeout: 30000 });
-    };
+    const authorizationPromise = new Promise((resolve, reject) => {
+        timeout = setTimeout(() => {
+            reject(new Error(
+                `No authorized request to ${API_ORIGIN} was observed within ` +
+                `${TOKEN_CAPTURE_TIMEOUT_MS / 1000} seconds`
+            ));
+        }, TOKEN_CAPTURE_TIMEOUT_MS);
 
-    await openPageTwo();
+        onRequest = async (request) => {
+            try {
+                if (new URL(request.url()).origin !== API_ORIGIN) return;
 
-    const readCourseStatus = () => courseTable.evaluate((table, courseName) => {
-        const normalize = (value) => value?.trim().replace(/\s+/g, ' ') ?? '';
-        const headers = [...table.querySelectorAll('thead th')].map((header) =>
-            normalize(header.textContent)
-        );
+                const [authorization, requestHeaders] = await Promise.all([
+                    request.headerValue('authorization'),
+                    request.allHeaders(),
+                ]);
 
-        const courseNameIndex = headers.indexOf('Course Name');
-        const row = [...table.querySelectorAll(
-            'tbody tr:not([aria-hidden="true"])'
-        )].find((candidate) => {
-            const cells = candidate.querySelectorAll(':scope > td');
-            return normalize(cells[courseNameIndex]?.textContent) === courseName;
-        });
+                if (!/^Bearer\s+\S+$/i.test(authorization ?? '')) return;
 
-        if (!row) return null;
-
-        const cells = [...row.querySelectorAll(':scope > td')];
-        const valueFor = (headerName) => {
-            const index = headers.indexOf(headerName);
-            return index >= 0 ? normalize(cells[index]?.textContent) : '';
+                resolve({
+                    authorization,
+                    browserHeaders: selectBrowserHeaders(requestHeaders),
+                });
+            } catch (error) {
+                console.warn(
+                    `[${timestamp()}] Could not inspect an API request: ` +
+                    error.message
+                );
+            }
         };
-        const availableSlots = Number(valueFor('Available Slots'));
-        const action = valueFor('Action');
-        let status = 'UNKNOWN';
 
-        if (/registered/i.test(action)) {
-            status = 'REGISTERED';
-        } else if (/register/i.test(action) && availableSlots > 0) {
-            status = 'AVAILABLE';
-        } else if (/full/i.test(action) || availableSlots === 0) {
-            status = 'FULL';
-        }
-
-        return {
-            courseCode: valueFor('Course Code'),
-            sectionCode: valueFor('Section Code'),
-            availableSlots,
-            status,
-        };
-    }, targetCourseName);
-
-    const readRegisteredCredits = async () => {
-        const text = (await registeredCreditsText.innerText()).trim();
-        const match = text.match(/Registered Credits:\s*(\d+(?:\.\d+)?)/i);
-
-        if (!match) {
-            throw new Error(
-                `Could not read registered credits from: "${text}"`
-            );
-        }
-
-        return Number(match[1]);
-    };
-
-    const registerButton = targetCourseRow.getByRole('button', {
-        name: 'Register',
-        exact: true,
+        // This listener must exist before navigation so that an early API
+        // request cannot pass before we start watching for the token.
+        page.on('request', onRequest);
     });
 
-    // Confirm registration in the currently visible modal. Avoid generated
-    // Ant Design classes and DOM-position selectors such as nth-child.
-    const confirmRegistrationButton = page.locator(
-        '.ant-modal-wrap:visible .form-footer button.ant-btn-primary'
-    );
-
-    // These are application-owned structural classes, not generated CSS names.
-    const refreshButton = page.locator(
-        'main .header .action.no-print > button'
-    );
-    let refreshClickCount = 0;
-
-    while (true) {
-        const [course, registeredCredits] = await Promise.all([
-            readCourseStatus(),
-            readRegisteredCredits(),
+    try {
+        const [, capturedRequest] = await Promise.all([
+            loadPage(),
+            authorizationPromise,
         ]);
+        return capturedRequest;
+    } finally {
+        clearTimeout(timeout);
+        page.off('request', onRequest);
+    }
+}
 
-        if (!course) {
-            throw new Error(`Could not find course: ${targetCourseName}`);
-        }
+async function refreshAuthorizationEveryMinute(page, tokenState, signal) {
+    while (!signal.aborted) {
+        await sleep(TOKEN_REFRESH_INTERVAL_MS, signal);
+        if (signal.aborted) break;
 
-        console.log(
-            `[${new Date().toLocaleString()}] ${targetCourseName}: ` +
-            `${course.status} (${course.availableSlots} slots available, ` +
-            `registered credits: ${registeredCredits})`
-        );
-
-        if (course.status === 'AVAILABLE') {
-            await registerButton.waitFor({ state: 'visible' });
-            await registerButton.click();
-            console.log(`Clicked Register for ${targetCourseName}.`);
-
-            await confirmRegistrationButton.waitFor({ state: 'visible' });
-
-            const registrationResponsePromise = page.waitForResponse(
-                (response) =>
-                    ['xhr', 'fetch'].includes(
-                        response.request().resourceType()
-                    ) &&
-                    ['POST', 'PUT', 'PATCH'].includes(
-                        response.request().method()
-                    ),
-                { timeout: 30000 }
+        try {
+            const capturedRequest = await loadPageAndCaptureAuthorization(
+                page,
+                () => page.reload({ waitUntil: 'domcontentloaded' })
             );
 
-            await confirmRegistrationButton.click();
-            const registrationResponse = await registrationResponsePromise;
-            await registrationResponse.finished();
+            Object.assign(tokenState, capturedRequest);
+            console.log(`[${timestamp()}] Bearer token refreshed.`);
+        } catch (error) {
+            console.error(
+                `[${timestamp()}] Bearer token refresh failed: ${error.message}`
+            );
+        }
+    }
+}
 
-            if (!registrationResponse.ok()) {
-                throw new Error(
-                    `Registration request failed with HTTP ` +
-                    `${registrationResponse.status()}: ` +
-                    registrationResponse.url()
+function responseMessage(body) {
+    if (body === null || body === undefined || body === '') return '(empty body)';
+    if (typeof body === 'string') return body;
+
+    return body.message ?? body.error ?? JSON.stringify(body);
+}
+
+async function tryToRegister(authorization, browserHeaders) {
+    const response = await fetch(REGISTRATION_URL, {
+        method: 'POST',
+        headers: {
+            ...browserHeaders,
+            accept: 'application/json, text/plain, */*',
+            authorization,
+            'content-type': 'application/json',
+            origin: 'https://one.vinuni.edu.vn',
+            referer: 'https://one.vinuni.edu.vn/',
+        },
+        body: JSON.stringify(REGISTRATION_BODY),
+    });
+
+    const responseText = await response.text();
+    let responseBody = responseText;
+
+    try {
+        responseBody = responseText ? JSON.parse(responseText) : null;
+    } catch {
+        // Keep a non-JSON response as text so it is still useful in the log.
+    }
+
+    return {
+        succeeded: response.ok && responseBody?.success === true,
+        status: response.status,
+        body: responseBody,
+    };
+}
+
+async function registerEverySecond(tokenState, signal) {
+    let attempt = 0;
+
+    while (!signal.aborted) {
+        const attemptStartedAt = Date.now();
+        attempt += 1;
+
+        try {
+            const result = await tryToRegister(
+                tokenState.authorization,
+                tokenState.browserHeaders
+            );
+            const message = responseMessage(result.body);
+
+            if (result.succeeded) {
+                console.log(
+                    `[${timestamp()}] Registration succeeded on attempt ` +
+                    `${attempt} (HTTP ${result.status}): ${message}`
                 );
+                return true;
             }
 
             console.log(
-                `Confirmed registration for ${targetCourseName} ` +
-                `(HTTP ${registrationResponse.status()}).`
+                `[${timestamp()}] Registration attempt ${attempt} failed ` +
+                `(HTTP ${result.status}): ${message}`
             );
-            break;
+        } catch (error) {
+            console.error(
+                `[${timestamp()}] Registration attempt ${attempt} errored: ` +
+                error.message
+            );
         }
 
-        await page.waitForTimeout(refreshIntervalMs);
-        await refreshButton.waitFor({ state: 'visible' });
-
-        const refreshResponse = page.waitForResponse(
-            (response) =>
-                ['xhr', 'fetch'].includes(response.request().resourceType()) &&
-                response.request().method() !== 'OPTIONS',
-            { timeout: 30000 }
-        ).catch((error) => {
-            console.warn(
-                `Refresh response failed: ${error.message}. Reloading the page.`
-            );
-            return null;
-        });
-
-        await refreshButton.click();
-        const response = await refreshResponse;
-
-        if (!response) {
-            await page.reload({ waitUntil: 'domcontentloaded' });
-            await openPageTwo();
-            refreshClickCount = 0;
-            continue;
-        }
-
-        await response.finished();
-        await targetCourseRow.waitFor({ state: 'visible' });
-        refreshClickCount += 1;
-
-        if (refreshClickCount === maxRefreshClickCount) {
-            console.log(
-                `Refresh button clicked ${maxRefreshClickCount} times; reloading the browser page.`
-            );
-            await page.reload({ waitUntil: 'domcontentloaded' });
-            await openPageTwo();
-            refreshClickCount = 0;
-        }
+        // Keep attempts one second apart while ensuring requests never overlap.
+        const remainingDelay = Math.max(
+            0,
+            REGISTRATION_INTERVAL_MS - (Date.now() - attemptStartedAt)
+        );
+        await sleep(remainingDelay, signal);
     }
 
-
-    // Put the rest of your automation logic here
-
-    await browser.close();
+    return false;
 }
 
-runAutomation();
+async function runAutomation() {
+    const headless = getHeadlessOption();
+    const controller = new AbortController();
+    const tokenState = {
+        authorization: null,
+        browserHeaders: {},
+    };
+    let browser;
+
+    const stop = () => {
+        if (controller.signal.aborted) return;
+        console.log(`\n[${timestamp()}] Shutting down...`);
+        controller.abort();
+    };
+
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+
+    try {
+        console.log(`Launching browser with headless=${headless}`);
+        browser = await chromium.launch({ headless });
+
+        const context = await browser.newContext({ storageState: 'auth.json' });
+        const page = await context.newPage();
+
+        const capturedRequest = await loadPageAndCaptureAuthorization(
+            page,
+            () => page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded' })
+        );
+        Object.assign(tokenState, capturedRequest);
+        console.log(`[${timestamp()}] Initial Bearer token captured.`);
+
+        const refreshLoop = refreshAuthorizationEveryMinute(
+            page,
+            tokenState,
+            controller.signal
+        );
+        const registered = await registerEverySecond(
+            tokenState,
+            controller.signal
+        );
+
+        if (registered) controller.abort();
+        await refreshLoop;
+    } finally {
+        controller.abort();
+        process.removeListener('SIGINT', stop);
+        process.removeListener('SIGTERM', stop);
+        await browser?.close();
+    }
+}
+
+runAutomation().catch((error) => {
+    console.error(`[${timestamp()}] Fatal error:`, error);
+    process.exitCode = 1;
+});

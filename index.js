@@ -1,4 +1,4 @@
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 const PORTAL_URL =
     'https://one.vinuni.edu.vn/student/academic/course-registration';
@@ -8,7 +8,8 @@ const REGISTRATION_URL =
 
 const TOKEN_REFRESH_INTERVAL_MS = 60_000;
 const TOKEN_CAPTURE_TIMEOUT_MS = 30_000;
-const REGISTRATION_INTERVAL_MS = 1_000;
+const MIN_REGISTRATION_INTERVAL_MS = 1_000;
+const MAX_REGISTRATION_INTERVAL_MS = 3_000;
 
 const BROWSER_HEADER_NAMES = [
     'accept-language',
@@ -49,6 +50,13 @@ function getHeadlessOption() {
 
 function timestamp() {
     return new Date().toLocaleString();
+}
+
+function randomRegistrationInterval() {
+    return Math.floor(
+        Math.random() *
+        (MAX_REGISTRATION_INTERVAL_MS - MIN_REGISTRATION_INTERVAL_MS + 1)
+    ) + MIN_REGISTRATION_INTERVAL_MS;
 }
 
 function sleep(milliseconds, signal) {
@@ -188,7 +196,7 @@ async function tryToRegister(authorization, browserHeaders) {
     };
 }
 
-async function registerEverySecond(tokenState, signal) {
+async function registerAtRandomIntervals(tokenState, signal) {
     let attempt = 0;
 
     while (!signal.aborted) {
@@ -221,10 +229,12 @@ async function registerEverySecond(tokenState, signal) {
             );
         }
 
-        // Keep attempts one second apart while ensuring requests never overlap.
+        // Randomize the start-to-start interval while ensuring requests do not
+        // overlap if an individual request takes longer than the chosen delay.
+        const registrationInterval = randomRegistrationInterval();
         const remainingDelay = Math.max(
             0,
-            REGISTRATION_INTERVAL_MS - (Date.now() - attemptStartedAt)
+            registrationInterval - (Date.now() - attemptStartedAt)
         );
         await sleep(remainingDelay, signal);
     }
@@ -269,7 +279,7 @@ async function runAutomation() {
             tokenState,
             controller.signal
         );
-        const registered = await registerEverySecond(
+        const registered = await registerAtRandomIntervals(
             tokenState,
             controller.signal
         );

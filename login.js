@@ -1,4 +1,4 @@
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 async function saveAuth() {
     // Launch a visible browser so you can interact with it

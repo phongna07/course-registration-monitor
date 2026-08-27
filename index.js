@@ -1,7 +1,7 @@
 const { chromium } = require('./browser');
 
 const PORTAL_URL =
-    'https://one.vinuni.edu.vn/student/academic/course-registration';
+    'https://one.vinuni.edu.vn/student/hoc-tap/dang-ky-tin-chi';
 const API_ORIGIN = 'https://one-apigw.vinuni.edu.vn';
 const REGISTRATION_URL =
     `${API_ORIGIN}/connect/qldt/dang-ky-tin-chi/dang-ky/lop-hoc-phan`;
@@ -24,7 +24,7 @@ const BROWSER_HEADER_NAMES = [
 ];
 
 const REGISTRATION_BODY = {
-    phieuDktcId: '6a4259f7b061bb0ed785995f',
+    phieuDktcId: '6a8c58a5dbe25bda45229c5e',
     dangKy: {
         lopHocPhanId: '6a41eb8510fdcb8786daf205',
         maKhoaNganh: '',

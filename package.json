@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "headless": "node index.js --headless=true",
-    "headed": "node index.js --headless=false"
+    "headless": "bun index.js --headless=true",
+    "headed": "bun index.js --headless=false"
   },
   "keywords": [],
   "author": "",

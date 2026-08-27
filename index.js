@@ -10,6 +10,8 @@ const TOKEN_REFRESH_INTERVAL_MS = 60_000;
 const TOKEN_CAPTURE_TIMEOUT_MS = 30_000;
 const MIN_REGISTRATION_INTERVAL_MS = 1_000;
 const MAX_REGISTRATION_INTERVAL_MS = 3_000;
+const REGISTRATION_START_TIME = new Date('2026-08-28T14:59:00+07:00');
+const LOG_TIME_ZONE = 'Asia/Bangkok';
 
 const BROWSER_HEADER_NAMES = [
     'accept-language',
@@ -23,10 +25,17 @@ const BROWSER_HEADER_NAMES = [
     'user-agent',
 ];
 
-const REGISTRATION_BODY = {
+const COURSES_IDS = [
+    '6a7e78be58a0c27d5d02879e',
+    '6a7e78be58a0c27d5d0287e2',
+    '6a7e78bf58a0c27d5d0288d7',
+    '6a7e78bf58a0c27d5d02896a',
+    '6a7e78bf58a0c27d5d0289aa',
+];
+
+const REGISTRATION_BODY_TEMPLATE = {
     phieuDktcId: '6a8c58a5dbe25bda45229c5e',
     dangKy: {
-        lopHocPhanId: '6a41eb8510fdcb8786daf205',
         maKhoaNganh: '',
     },
     silent: true,
@@ -48,8 +57,25 @@ function getHeadlessOption() {
     return value === 'true';
 }
 
-function timestamp() {
-    return new Date().toLocaleString();
+function timestamp(date = new Date()) {
+    return date.toLocaleString('en-US', { timeZone: LOG_TIME_ZONE });
+}
+
+function formatDuration(milliseconds) {
+    const totalSeconds = Math.ceil(milliseconds / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return [
+        hours && `${hours}h`,
+        (hours || minutes) && `${minutes}m`,
+        `${seconds}s`,
+    ].filter(Boolean).join(' ');
+}
+
+function courseLogPrefix(courseId, courseIndex, totalCourses) {
+    return `[Course ${courseIndex + 1}/${totalCourses}] [${courseId}]`;
 }
 
 function randomRegistrationInterval() {
@@ -76,6 +102,29 @@ function sleep(milliseconds, signal) {
 
         signal.addEventListener('abort', finish, { once: true });
     });
+}
+
+async function waitForRegistrationStart(signal) {
+    const remainingMilliseconds = REGISTRATION_START_TIME.getTime() - Date.now();
+
+    if (remainingMilliseconds <= 0) {
+        console.log(
+            `[${timestamp()}] Registration trigger has already passed; ` +
+            'starting immediately.'
+        );
+        return !signal.aborted;
+    }
+
+    console.log(
+        `[${timestamp()}] Waiting ${formatDuration(remainingMilliseconds)} ` +
+        'before starting registration. Token refresh remains active.'
+    );
+    await sleep(remainingMilliseconds, signal);
+
+    if (signal.aborted) return false;
+
+    console.log(`[${timestamp()}] Registration trigger reached.`);
+    return true;
 }
 
 function selectBrowserHeaders(headers) {
@@ -166,9 +215,18 @@ function responseMessage(body) {
     return body.message ?? body.error ?? JSON.stringify(body);
 }
 
-async function tryToRegister(authorization, browserHeaders) {
+async function tryToRegister(authorization, browserHeaders, courseId, signal) {
+    const registrationBody = {
+        ...REGISTRATION_BODY_TEMPLATE,
+        dangKy: {
+            ...REGISTRATION_BODY_TEMPLATE.dangKy,
+            lopHocPhanId: courseId,
+        },
+    };
+
     const response = await fetch(REGISTRATION_URL, {
         method: 'POST',
+        signal,
         headers: {
             ...browserHeaders,
             accept: 'application/json, text/plain, */*',
@@ -177,7 +235,7 @@ async function tryToRegister(authorization, browserHeaders) {
             origin: 'https://one.vinuni.edu.vn',
             referer: 'https://one.vinuni.edu.vn/',
         },
-        body: JSON.stringify(REGISTRATION_BODY),
+        body: JSON.stringify(registrationBody),
     });
 
     const responseText = await response.text();
@@ -196,36 +254,50 @@ async function tryToRegister(authorization, browserHeaders) {
     };
 }
 
-async function registerAtRandomIntervals(tokenState, signal) {
+async function registerCourseAtRandomIntervals(
+    courseId,
+    courseIndex,
+    totalCourses,
+    tokenState,
+    signal
+) {
     let attempt = 0;
+    const logPrefix = courseLogPrefix(courseId, courseIndex, totalCourses);
 
     while (!signal.aborted) {
         const attemptStartedAt = Date.now();
         attempt += 1;
+        console.log(
+            `[${timestamp()}] ${logPrefix} Attempt ${attempt} started.`
+        );
 
         try {
             const result = await tryToRegister(
                 tokenState.authorization,
-                tokenState.browserHeaders
+                tokenState.browserHeaders,
+                courseId,
+                signal
             );
             const message = responseMessage(result.body);
 
             if (result.succeeded) {
                 console.log(
-                    `[${timestamp()}] Registration succeeded on attempt ` +
-                    `${attempt} (HTTP ${result.status}): ${message}`
+                    `[${timestamp()}] ${logPrefix} Registration succeeded on ` +
+                    `attempt ${attempt} (HTTP ${result.status}): ${message}`
                 );
                 return true;
             }
 
             console.log(
-                `[${timestamp()}] Registration attempt ${attempt} failed ` +
+                `[${timestamp()}] ${logPrefix} Attempt ${attempt} failed ` +
                 `(HTTP ${result.status}): ${message}`
             );
         } catch (error) {
+            if (signal.aborted) return false;
+
             console.error(
-                `[${timestamp()}] Registration attempt ${attempt} errored: ` +
-                error.message
+                `[${timestamp()}] ${logPrefix} Attempt ${attempt} errored: ` +
+                `${error.message}`
             );
         }
 
@@ -262,6 +334,10 @@ async function runAutomation() {
 
     try {
         console.log(`Launching browser with headless=${headless}`);
+        console.log(
+            `[${timestamp()}] Registration trigger configured for ` +
+            `${timestamp(REGISTRATION_START_TIME)} (GMT+7).`
+        );
         browser = await chromium.launch({ headless });
 
         const context = await browser.newContext({ storageState: 'auth.json' });
@@ -279,12 +355,38 @@ async function runAutomation() {
             tokenState,
             controller.signal
         );
-        const registered = await registerAtRandomIntervals(
-            tokenState,
+        const shouldRegister = await waitForRegistrationStart(
             controller.signal
         );
 
-        if (registered) controller.abort();
+        if (shouldRegister) {
+            console.log(
+                `[${timestamp()}] Starting ${COURSES_IDS.length} independent ` +
+                'course registration workers.'
+            );
+
+            const registrationResults = await Promise.all(
+                COURSES_IDS.map((courseId, courseIndex) =>
+                    registerCourseAtRandomIntervals(
+                        courseId,
+                        courseIndex,
+                        COURSES_IDS.length,
+                        tokenState,
+                        controller.signal
+                    )
+                )
+            );
+            const allRegistered = registrationResults.every(Boolean);
+
+            if (allRegistered) {
+                console.log(
+                    `[${timestamp()}] All ${COURSES_IDS.length} courses ` +
+                    'registered successfully. Shutting down.'
+                );
+                controller.abort();
+            }
+        }
+
         await refreshLoop;
     } finally {
         controller.abort();

@@ -29,8 +29,8 @@ const COURSES_IDS = [
     '6a7e78be58a0c27d5d02879e',
     '6a7e78be58a0c27d5d0287e2',
     '6a7e78bf58a0c27d5d0288d7',
-    '6a7e78bf58a0c27d5d02896a',
     '6a7e78bf58a0c27d5d0289aa',
+    '6a7e78bf58a0c27d5d02898a'
 ];
 
 const REGISTRATION_BODY_TEMPLATE = {
